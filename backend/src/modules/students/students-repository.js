@@ -1,4 +1,5 @@
 const { processDBRequest } = require("../../utils");
+const { db } = require("../../config");
 
 const getRoleId = async (roleName) => {
     const query = "SELECT id FROM roles WHERE name ILIKE $1";
@@ -111,11 +112,54 @@ const findStudentToUpdate = async (paylaod) => {
     return rows;
 }
 
+const deleteStudentById = async (id) => {
+    const client = await db.connect();
+    try {
+        await client.query("BEGIN");
+        const { rows: students } = await client.query(
+            "SELECT id FROM users WHERE id = $1 AND role_id = 3 FOR UPDATE",
+            [id]
+        );
+        if (students.length === 0) {
+            await client.query("ROLLBACK");
+            return { found: false, deleted: false };
+        }
+
+        const { rows: references } = await client.query(`
+            SELECT
+                EXISTS(SELECT 1 FROM users WHERE status_last_reviewer_id = $1) OR
+                EXISTS(SELECT 1 FROM users WHERE reporter_id = $1) OR
+                EXISTS(SELECT 1 FROM user_leaves WHERE user_id = $1 OR approver_id = $1) OR
+                EXISTS(SELECT 1 FROM class_teachers WHERE teacher_id = $1) OR
+                EXISTS(SELECT 1 FROM notices WHERE author_id = $1 OR reviewer_id = $1) OR
+                EXISTS(SELECT 1 FROM user_leave_policy WHERE user_id = $1) AS has_references
+        `, [id]);
+        if (references[0].has_references) {
+            await client.query("ROLLBACK");
+            return { found: true, deleted: false };
+        }
+
+        await client.query("DELETE FROM user_profiles WHERE user_id = $1", [id]);
+        const { rowCount } = await client.query(
+            "DELETE FROM users WHERE id = $1 AND role_id = 3",
+            [id]
+        );
+        await client.query("COMMIT");
+        return { found: true, deleted: rowCount === 1 };
+    } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+    } finally {
+        client.release();
+    }
+}
+
 module.exports = {
     getRoleId,
     findAllStudents,
     addOrUpdateStudent,
     findStudentDetail,
     findStudentToSetStatus,
-    findStudentToUpdate
+    findStudentToUpdate,
+    deleteStudentById
 };
